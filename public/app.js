@@ -10,6 +10,7 @@
   const DelImpactLib = window.DelImpactLib;
   const RenLib = window.KeyRenameLib;
   const ChoicesLib = window.ChoicesLib;
+  const DraftLib = window.DraftLib;
 
   const els = {
     base: document.getElementById('base'),
@@ -21,6 +22,12 @@
     schemaInput: document.getElementById('schemaInput'),
     schemaSection: document.getElementById('schemaSection'),
     schemaSampleBtn: document.getElementById('schemaSampleBtn'),
+    draftBar: document.getElementById('draftBar'),
+    draftBarMsg: document.getElementById('draftBarMsg'),
+    draftRestoreBtn: document.getElementById('draftRestoreBtn'),
+    draftDiscardBtn: document.getElementById('draftDiscardBtn'),
+    draftNote: document.getElementById('draftNote'),
+    draftWarn: document.getElementById('draftWarn'),
     error: document.getElementById('error'),
     staleNote: document.getElementById('staleNote'),
     schemaValidation: document.getElementById('schemaValidation'),
@@ -121,6 +128,9 @@
     lastChoices: '',         // 序列化后的记录 JSON（下载用）
     choiceImport: null,      // 导入预览：null | { status:'error', reason }
     //                        // | { status:'ready', entries, plan }
+    // 浏览器本地「合并草稿」：mergedInputs 为最近一次成功合并所用的三方文本
+    // （输入改动后与编辑框内容不一致，即要求重新合并）；草稿文本由 DraftLib 持久化
+    mergedInputs: null,      // null | { base, mine, theirs }（均为字符串）
   };
 
   /* ---------- 输入解析与错误提示 ---------- */
@@ -206,7 +216,9 @@
 
   /* ---------- 合并与渲染 ---------- */
 
-  function doMerge() {
+  // 开始合并。replayChoices 非空时（仅用于本地草稿恢复）：重新解析与合并后，
+  // 按路径与三方值严格匹配重放草稿选边，并返回 { applied, skipped } 供页面提示。
+  function doMerge(replayChoices) {
     clearError();
     els.staleNote.hidden = true;
     const parsed = parseInputs();
@@ -214,11 +226,13 @@
       state.parsed = false;
       els.resultSection.hidden = true;
       renderSchemaPanel();
-      return;
+      return null;
     }
     state.base = parsed.base;
     state.mine = parsed.mine;
     state.theirs = parsed.theirs;
+    // 记录本轮合并所用三方文本：草稿据此判断刷新后能否直接重放选边
+    state.mergedInputs = { base: els.base.value, mine: els.mine.value, theirs: els.theirs.value };
     state.resolutions = new Map();
     state.stale = false;
     state.suggestion = null; // 新一轮合并：旧改选建议一并作废
@@ -229,9 +243,22 @@
     state.allConflicts = first.conflicts;
     state.parsed = true;
 
+    // 草稿恢复重放：只有路径与基线 / 我的 / 对方三值与当前冲突完全一致的条目才重放；
+    // 其余跳过并在返回值中说明。草稿可能没有已选冲突（choices 为空），
+    // 此时 replayInfo 仍是非 null 的成功结果（applied=0），不代表解析失败。
+    // 旧结果与旧校验状态从未恢复——这里是重新合并得到的新结果
+    let replayInfo = { applied: 0, skipped: [] };
+    if (Array.isArray(replayChoices) && replayChoices.length > 0) {
+      const draft = DraftLib.buildDraft({ choices: replayChoices });
+      const plan = DraftLib.planReplay(draft, state.allConflicts);
+      ChoicesLib.applyReuse(state.resolutions, plan.reusable);
+      replayInfo = { applied: plan.reusable.length, skipped: plan.skipped };
+    }
+
     els.resultSection.hidden = false;
     render();
     els.resultSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    return replayInfo;
   }
 
   function render() {
@@ -328,6 +355,8 @@
     renderRefExport();
     renderDelImpact();
     renderRename();
+    // 合并完成 / 选边变化后把现场（含本轮已选冲突）同步到浏览器本地草稿
+    persistDraft();
   }
 
   function renderConflicts() {
@@ -1462,7 +1491,8 @@
       state.suggestion = null;
       renderSchemaPanel();
     }
-    // 输入即时反馈但稍作防抖，避免每次击键都重新编译
+    persistDraft(); // Schema 文本立即保存；编译较慢，单独防抖
+    // 编译即时反馈但稍作防抖，避免每次击键都重新编译
     clearTimeout(schemaInputTimer);
     schemaInputTimer = setTimeout(syncSchemaFromInput, 300);
   }
@@ -1578,6 +1608,7 @@
       owner: 'team-a',
     }, null, 2);
     markStale();
+    persistDraft(); // 示例内容也自动保存，刷新后可恢复
   }
 
   function fillSampleSchema() {
@@ -1585,6 +1616,7 @@
     els.schemaInput.value = JSON.stringify(SAMPLE_SCHEMA, null, 2);
     els.schemaInput.classList.remove('invalid');
     syncSchemaFromInput();
+    persistDraft();
   }
 
   function clearAll() {
@@ -1601,6 +1633,7 @@
     state.lastAttribution = '';
     state.attrFilter = 'all';
     state.stale = false;
+    state.mergedInputs = null;
     state.schemaStatus = '';
     state.schemaError = '';
     state.validator = null;
@@ -1619,8 +1652,16 @@
     resetRenameState();
     rebuildRenKeyOptions([]);
     clearError();
+    clearDraftNote();
     els.staleNote.hidden = true;
     els.resultSection.hidden = true;
+    // 清空即删除浏览器本地草稿（保存失败也要说明原因）
+    pendingDraft = null;
+    els.draftBar.hidden = true;
+    const dr = DraftLib.removeDraft(storage);
+    if (dr.status === 'ok') draftWriteError = '';
+    else draftWriteError = dr.reason;
+    renderDraftWarn();
     renderSchemaPanel();
     renderAttribution();
     renderChoices();
@@ -1633,6 +1674,8 @@
   function markStale() {
     if (!state.parsed) return;
     state.stale = true;
+    // 输入偏离最近一次合并所用文本：草稿恢复时只能恢复编辑文本，需重新合并
+    state.mergedInputs = null;
     els.staleNote.hidden = false;
     // 归因清单基于本轮基线与结果：输入一改即失效，立即清空
     state.attribution = [];
@@ -1675,11 +1718,233 @@
     // Schema 状态禁用，这里保持禁用即可。
   }
 
+  /* ---------- 浏览器本地「合并草稿」 ---------- */
+
+  // 草稿只存当前浏览器的 localStorage，不经过任何服务端。
+  // 隐私模式 / 存储被禁用 / 配额不足时 storage 可能不可用或写入被拒，
+  // 此时只给出说明，合并功能照常使用。
+  const storageProbe = getLocalStorage();
+  const storage = storageProbe.storage;
+  let draftWriteError = storageProbe.reason; // 探测即被拒绝时，启动就展示原因
+  let pendingDraft = null;    // 启动时读到、等待用户选择恢复 / 丢弃的草稿
+
+  function getLocalStorage() {
+    try {
+      const ls = window.localStorage;
+      // 部分浏览器下访问 / 写入会直接抛 SecurityError，这里探测一次
+      if (ls) {
+        const k = '__json_merge_probe__';
+        ls.setItem(k, '1');
+        ls.removeItem(k);
+      }
+      return { storage: ls || null, reason: '' };
+    } catch (err) {
+      // 隐私模式 / 站点存储被禁用：探测即被拒绝，记录具体原因用于页面说明
+      return { storage: null, reason: probeErrorReason(err) };
+    }
+  }
+
+  function probeErrorReason(err) {
+    const name = err && err.name ? err.name : (err && err.code) || 'Error';
+    if (name === 'SecurityError' || name === 'AccessDeniedError' || name === 'NS_ERROR_DOM_SECURITY_ERR') {
+      return `浏览器拒绝访问本地存储（${name}）：可能处于隐私模式，或站点存储权限被禁用，草稿无法保存。`;
+    }
+    if (name === 'QuotaExceededError' || name === 'NS_ERROR_DOM_QUOTA_REACHED' || (err && err.code) === 22) {
+      return `浏览器本地存储空间已满（${name}），草稿无法保存。`;
+    }
+    return `浏览器本地存储不可用（${name}），草稿无法保存。`;
+  }
+
+  // 从当前 state 与输入框构造草稿：inputs 是正在编辑的文本，merged 是最近一次
+  // 合并所用文本，choices 是本轮已选冲突（路径 / 三值 / 选边，不含完整输入）
+  function currentDraft() {
+    let choices = [];
+    if (state.parsed && state.resolutions.size > 0) {
+      choices = ChoicesLib.serializeChoices(state.allConflicts, state.resolutions).choices;
+    }
+    return DraftLib.buildDraft({
+      inputs: { base: els.base.value, mine: els.mine.value, theirs: els.theirs.value },
+      schema: els.schemaInput.value,
+      merged: state.mergedInputs,
+      choices,
+    });
+  }
+
+  // 立即写入草稿；空白草稿等价于删除。返回是否成功
+  function persistDraft() {
+    const r = DraftLib.writeDraft(storage, currentDraft());
+    if (r.status === 'ok') {
+      draftWriteError = '';
+      renderDraftWarn();
+      return true;
+    }
+    draftWriteError = r.reason;
+    renderDraftWarn();
+    return false;
+  }
+
+  function renderDraftWarn() {
+    els.draftWarn.innerHTML = '';
+    if (!draftWriteError) {
+      els.draftWarn.hidden = true;
+      return;
+    }
+    els.draftWarn.hidden = false;
+    const msg = document.createElement('span');
+    msg.textContent = draftWriteError + '合并功能仍可正常使用，但本次改动不会被自动恢复。';
+    const retry = document.createElement('button');
+    retry.type = 'button';
+    retry.className = 'minor';
+    retry.textContent = '重试保存';
+    retry.addEventListener('click', () => {
+      if (persistDraft()) showDraftNote('草稿已保存到当前浏览器。');
+    });
+    els.draftWarn.append(msg, retry);
+  }
+
+  function showDraftNote(text) {
+    els.draftNote.textContent = text;
+    els.draftNote.hidden = false;
+  }
+
+  function clearDraftNote() {
+    els.draftNote.textContent = '';
+    els.draftNote.hidden = true;
+  }
+
+  function formatSavedAt(ms) {
+    const d = new Date(ms);
+    if (Number.isNaN(d.getTime())) return '';
+    const p = (n) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} `
+      + `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+  }
+
+  // 启动时读取草稿：有效则显示恢复 / 丢弃提示；损坏或存储被拒时说明原因
+  function initDraftBanner() {
+    const r = DraftLib.readDraft(storage);
+    if (r.status === 'ok') {
+      pendingDraft = r.draft;
+      renderDraftBar(r.draft);
+    } else if (r.status === 'corrupt') {
+      pendingDraft = null;
+      showDraftNote('检测到已损坏的本地合并草稿（' + r.reason + '），该草稿已被删除；可正常开始新的合并。');
+    } else if (r.status === 'unavailable') {
+      pendingDraft = null;
+      // 探测阶段已记录具体原因；读取阶段若再被拒绝则更新为读取原因
+      if (!draftWriteError) draftWriteError = r.reason;
+      renderDraftWarn();
+    }
+  }
+
+  function renderDraftBar(draft) {
+    const parts = [`检测到 ${formatSavedAt(draft.savedAt)} 保存的合并草稿：`];
+    const filled = ['基线', '我的版本', '对方版本']
+      .filter((_, i) => Object.values(draft.inputs)[i].trim() !== '').length;
+    parts.push(`三方输入 ${filled}/3 栏有内容`);
+    if (draft.schema.trim() !== '') parts.push('含 Schema');
+    parts.push(draft.choices.length > 0 ? `已选 ${draft.choices.length} 个冲突` : '未选冲突');
+    parts.push(DraftLib.snapshotMatches(draft.inputs, draft.merged)
+      ? '恢复后将自动重新合并并重放匹配的选边。'
+      : '输入自上次合并后已改动：仅恢复编辑文本，需重新合并。');
+    els.draftBarMsg.textContent = parts.join('，');
+    els.draftBar.hidden = false;
+  }
+
+  // 恢复草稿：编辑文本与 Schema 总是恢复；只有当前三方文本与保存的合并文本
+  // 逐字一致时才重新解析合并，并仅重放路径 + 三值完全匹配的选边。
+  // 旧结果与旧校验状态一律不恢复（结果区由重新合并生成，Schema 重新编译）。
+  function restoreDraft() {
+    const draft = pendingDraft;
+    els.draftBar.hidden = true;
+    pendingDraft = null;
+    if (!draft) return;
+
+    els.base.value = draft.inputs.base;
+    els.mine.value = draft.inputs.mine;
+    els.theirs.value = draft.inputs.theirs;
+    els.schemaInput.value = draft.schema;
+    els.schemaInput.classList.remove('invalid');
+    for (const ta of [els.base, els.mine, els.theirs]) ta.classList.remove('invalid');
+
+    const matches = DraftLib.snapshotMatches(draft.inputs, draft.merged);
+    if (matches) {
+      // 重新解析并合并（解析失败时退化为只恢复文本），随后严格重放匹配的选边
+      const replay = doMerge(draft.choices);
+      if (replay) {
+        // Schema 文本恢复后立即重新编译：旧校验结论不放行导出
+        syncSchemaFromInput();
+        const bits = [`草稿已恢复并重新合并，重放 ${replay.applied} 个匹配冲突的选边。`];
+        if (replay.skipped.length > 0) {
+          bits.push(`${replay.skipped.length} 个草稿选边因冲突已消失或三方值变化未重放，请手动确认。`);
+        }
+        showDraftNote(bits.join(''));
+      } else {
+        // 三方文本虽与合并快照一致，但当前无法解析：只保留文本，提示修正后重新合并
+        syncSchemaFromInput();
+        enterDraftEditText('草稿中的三方输入当前无法解析为 JSON，已恢复编辑文本，请修正后重新点击「开始合并」。');
+        return;
+      }
+    } else {
+      // 输入已改动：只恢复编辑文本与 Schema，旧合并结果 / 旧校验状态不恢复、不放行导出
+      syncSchemaFromInput();
+      enterDraftEditText('草稿已恢复：三方输入与上次合并时不一致，仅恢复编辑文本，请重新点击「开始合并」。');
+    }
+  }
+
+  // 仅文本恢复：不展示任何旧结果，mergedInputs 置空并立即保存
+  // （草稿中的旧 merged / choices 随后被新现场覆盖，绝不会被直接放行导出）
+  function enterDraftEditText(note) {
+    state.parsed = false;
+    state.mergedInputs = null;
+    state.resolutions = new Map();
+    state.allConflicts = [];
+    state.attribution = [];
+    state.lastAttribution = '';
+    state.lastPatch = '';
+    state.lastResult = undefined;
+    state.lastJson = '';
+    state.lastChoices = '';
+    state.choiceImport = null;
+    state.suggestion = null;
+    state.stale = false;
+    state.refSelection = new Set();
+    state.refClosure = null;
+    state.lastSubdoc = '';
+    state.delSelection = new Set();
+    state.delResult = null;
+    els.resultSection.hidden = true;
+    els.staleNote.hidden = true;
+    renderAttribution();
+    renderChoices();
+    renderRefExport();
+    renderDelImpact();
+    renderRename();
+    showDraftNote(note);
+    persistDraft();
+  }
+
+  // 丢弃草稿：删除存储中的草稿，页面保持空白；保存失败时说明原因
+  function discardDraft() {
+    const r = DraftLib.removeDraft(storage);
+    els.draftBar.hidden = true;
+    pendingDraft = null;
+    if (r.status === 'ok') {
+      showDraftNote('本地合并草稿已丢弃。');
+    } else {
+      draftWriteError = r.reason;
+      renderDraftWarn();
+      showDraftNote('草稿丢弃失败：' + r.reason);
+    }
+  }
+
   /* ---------- 事件绑定 ---------- */
 
-  els.mergeBtn.addEventListener('click', doMerge);
+  els.mergeBtn.addEventListener('click', () => doMerge());
   els.sampleBtn.addEventListener('click', fillSample);
   els.clearBtn.addEventListener('click', clearAll);
+  els.draftRestoreBtn.addEventListener('click', restoreDraft);
+  els.draftDiscardBtn.addEventListener('click', discardDraft);
   els.exportBtn.addEventListener('click', downloadResult);
   els.copyBtn.addEventListener('click', copyResult);
   els.patchBtn.addEventListener('click', downloadPatch);
@@ -1709,6 +1974,7 @@
     ta.addEventListener('input', () => {
       ta.classList.remove('invalid');
       markStale();
+      persistDraft(); // 立即自动保存正在编辑的三方输入（同步写本地，关闭页面前生效）
     });
     // Ctrl/Cmd + Enter 快捷合并
     ta.addEventListener('keydown', (e) => {
@@ -1718,4 +1984,7 @@
 
   // 初始渲染一次空 Schema 面板（隐藏状态）
   renderSchemaPanel();
+
+  // 启动时检查浏览器本地草稿，提示恢复或丢弃（损坏 / 存储被拒时说明原因）
+  initDraftBanner();
 })();

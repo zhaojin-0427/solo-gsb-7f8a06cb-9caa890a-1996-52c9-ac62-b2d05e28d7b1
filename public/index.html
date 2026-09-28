@@ -34,6 +34,16 @@
       <button id="clearBtn" type="button">清空</button>
     </div>
 
+    <div id="draftBar" class="draft-bar" hidden>
+      <div id="draftBarMsg" class="draft-bar-msg"></div>
+      <div class="draft-bar-actions">
+        <button id="draftRestoreBtn" type="button" class="primary">恢复草稿</button>
+        <button id="draftDiscardBtn" type="button">丢弃</button>
+      </div>
+    </div>
+    <div id="draftNote" class="note" hidden></div>
+    <div id="draftWarn" class="draft-warn" hidden></div>
+
     <details id="schemaSection" class="schema-section">
       <summary>JSON Schema 校验（可选，Draft 2020-12，仅支持文档内 <code>$ref</code>，不请求远程引用）</summary>
       <div class="schema-head">
@@ -143,6 +153,7 @@
   <script src="/lib/delimpact.js"></script>
   <script src="/lib/keyrename.js"></script>
   <script src="/lib/choices.js"></script>
+  <script src="/lib/draft.js"></script>
   <script src="/app.js"></script>
 </body>
 </html>

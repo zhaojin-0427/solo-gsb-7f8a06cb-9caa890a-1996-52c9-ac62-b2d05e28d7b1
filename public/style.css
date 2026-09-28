@@ -114,6 +114,55 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   font-size: 13px;
 }
 
+/* ---------- 本地合并草稿恢复 / 保存告警 ---------- */
+
+.draft-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  background: #ddf4e4;
+  border: 1px solid var(--ok);
+  border-radius: 6px;
+  padding: 10px 14px;
+  margin: 12px 0;
+  font-size: 13px;
+}
+
+.draft-bar-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.draft-bar-actions button {
+  font-size: 13px;
+  padding: 6px 14px;
+}
+
+.draft-warn {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  background: #ffebe9;
+  border: 1px solid var(--danger);
+  color: var(--danger);
+  border-radius: 6px;
+  padding: 8px 14px;
+  margin: 12px 0;
+  font-size: 13px;
+}
+
+.draft-warn button {
+  font-size: 12px;
+  padding: 4px 10px;
+  white-space: nowrap;
+}
+
 .status-bar {
   background: #ddf4e4;
   border: 1px solid var(--ok);

@@ -10,6 +10,7 @@
   const DelImpactLib = window.DelImpactLib;
   const RenLib = window.KeyRenameLib;
   const ChoicesLib = window.ChoicesLib;
+  const DraftLib = window.DraftLib;
 
   const els = {
     base: document.getElementById('base'),
@@ -18,6 +19,7 @@
     mergeBtn: document.getElementById('mergeBtn'),
     sampleBtn: document.getElementById('sampleBtn'),
     clearBtn: document.getElementById('clearBtn'),
+    draftBar: document.getElementById('draftBar'),
     schemaInput: document.getElementById('schemaInput'),
     schemaSection: document.getElementById('schemaSection'),
     schemaSampleBtn: document.getElementById('schemaSampleBtn'),
@@ -70,6 +72,8 @@
     allConflicts: [],      // 本次合并的全部冲突（解决后仍保留在列表中，可改选）
     resolutions: new Map(), // key -> 'mine' | 'theirs'
     lastJson: '',
+    // 最近一次合并所用的三方文本（草稿重放的一致性依据；合并后输入再改不会更新）
+    mergedInputs: null,    // null | { base, mine, theirs }（文本）
     lastPatch: '',         // 本轮基线 -> 合并结果的 RFC 6902 操作数组（JSON 文本）
     stale: false,          // 合并后输入又被编辑：补丁导出禁用、旧校验结论失效，重新合并后恢复
     // 归因清单：冲突全部解决且输入未被修改时生成；否则保持为空
@@ -221,6 +225,8 @@
     state.theirs = parsed.theirs;
     state.resolutions = new Map();
     state.stale = false;
+    // 记录本组合并所用的三方文本：用于浏览器本地草稿的安全重放
+    state.mergedInputs = { base: els.base.value, mine: els.mine.value, theirs: els.theirs.value };
     state.suggestion = null; // 新一轮合并：旧改选建议一并作废
     state.choiceImport = null; // 新一轮合并：上一轮导入预览随之作废（可重新导入）
 
@@ -231,6 +237,7 @@
 
     els.resultSection.hidden = false;
     render();
+    scheduleDraftSave(); // 已完成一轮合并：立即把合并快照写入浏览器本地草稿
     els.resultSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }
 
@@ -398,6 +405,7 @@
         // 手动改选后，未应用的导入预览立即作废（预览基于改选前的选择情况）
         state.choiceImport = null;
         render();
+        scheduleDraftSave(); // 选边即自动保存进浏览器本地草稿
       });
       lab.append(radio, document.createTextNode(text));
       choices.appendChild(lab);
@@ -689,6 +697,7 @@
     state.choiceImport = null;
     state.suggestion = null; // 选边变化：旧改选建议一并失效
     render();
+    scheduleDraftSave();
   }
 
   /* ---------- 引用闭包子文档导出 ---------- */
@@ -1389,6 +1398,7 @@
     state.suggestion = null;
     state.choiceImport = null; // 批量改选后未应用的导入预览同样作废
     render();
+    scheduleDraftSave();
   }
 
   /* ---------- Schema 输入处理 ---------- */
@@ -1465,6 +1475,7 @@
     // 输入即时反馈但稍作防抖，避免每次击键都重新编译
     clearTimeout(schemaInputTimer);
     schemaInputTimer = setTimeout(syncSchemaFromInput, 300);
+    scheduleDraftSave(); // 可选 Schema 也是草稿的一部分
   }
 
   /* ---------- 导出 ---------- */
@@ -1578,6 +1589,7 @@
       owner: 'team-a',
     }, null, 2);
     markStale();
+    scheduleDraftSave(); // 「填入示例」改写三方输入：草稿同步为最新编辑文本
   }
 
   function fillSampleSchema() {
@@ -1596,6 +1608,7 @@
     state.parsed = false;
     state.resolutions = new Map();
     state.allConflicts = [];
+    state.mergedInputs = null;
     state.lastPatch = '';
     state.attribution = [];
     state.lastAttribution = '';
@@ -1621,6 +1634,9 @@
     clearError();
     els.staleNote.hidden = true;
     els.resultSection.hidden = true;
+    // 「清空」即用户主动放弃：删除浏览器本地草稿与所有草稿提示
+    clearDraftFromStorage();
+    hideDraftBar();
     renderSchemaPanel();
     renderAttribution();
     renderChoices();
@@ -1634,6 +1650,9 @@
     if (!state.parsed) return;
     state.stale = true;
     els.staleNote.hidden = false;
+    // 输入偏离最近一次合并所用文本：草稿仍持续保存编辑文本，但不再覆盖合并快照，
+    // 下次恢复时只能恢复文本、要求重新合并
+    scheduleDraftSave();
     // 归因清单基于本轮基线与结果：输入一改即失效，立即清空
     state.attribution = [];
     state.lastAttribution = '';
@@ -1675,6 +1694,327 @@
     // Schema 状态禁用，这里保持禁用即可。
   }
 
+  /* ---------- 浏览器本地「合并草稿」（localStorage，仅存于当前浏览器） ---------- */
+  /*
+   * 草稿内容：三方输入、可选 Schema、最近一次合并所用三方文本（state.mergedInputs）、
+   * 本轮已选冲突（state.resolutions，仅已选条目）与当时的合并结果文本。
+   * 编辑输入 / Schema、选边、应用导入或改选建议后防抖自动保存；pagehide 前再同步落盘。
+   * 刷新或重开页面时弹出「恢复 / 丢弃」提示；恢复时由 DraftLib.replaySnapshot
+   * 重新解析、重新合并并逐项校验，不通过则只恢复文本，旧结果与旧校验绝不放行。
+   */
+
+  let storage = null;        // localStorage 引用；浏览器拒绝存储时为 null
+  let storageError = '';     // 最近一次存储被拒绝的中文原因（'' 表示正常）
+  let storageWarned = false; // 失败提示只显示一次，直到下次成功写入
+  let draftTimer = null;     // 自动保存防抖
+  let pendingDraft = null;   // 打开页面时检测到、等待用户「恢复 / 丢弃」的草稿
+
+  function describeStorageError(err) {
+    const name = err && err.name ? err.name : '';
+    if (name === 'QuotaExceededError'
+        || name === 'NS_ERROR_DOM_QUOTA_REACHED'
+        || (err && err.code === 22)) {
+      return '浏览器本地存储已满（配额超限）：草稿未能写入。可清理浏览器存储后重试；正常合并功能不受影响。';
+    }
+    return '浏览器拒绝了本地存储（可能处于隐私 / 无痕模式，或该站点的存储被禁用）：草稿本次不会保存，但合并功能可正常使用。';
+  }
+
+  // 懒取 localStorage 并做一次最小读写探测（部分隐私模式能取到对象但写入即抛异常）
+  function getStorage() {
+    if (storage !== null) return storage;
+    try {
+      storage = window.localStorage;
+      const probe = '__json_merge_probe__';
+      storage.setItem(probe, '1');
+      storage.removeItem(probe);
+    } catch (err) {
+      storage = null;
+      storageError = describeStorageError(err);
+    }
+    return storage;
+  }
+
+  function currentInputsText() {
+    return { base: els.base.value, mine: els.mine.value, theirs: els.theirs.value };
+  }
+
+  function isEmptyInputs(t) {
+    return t.base.trim() === '' && t.mine.trim() === '' && t.theirs.trim() === '';
+  }
+
+  // 合并后输入再改（stale）也保留旧合并快照：恢复时由 DraftLib 发现
+  // 「当前文本 ≠ 合并文本」，从而只恢复文本、要求重新合并
+  function buildCurrentDraft() {
+    const mergeSpec = (state.parsed && state.mergedInputs)
+      ? {
+        inputs: state.mergedInputs,
+        conflicts: state.allConflicts,
+        resolutions: state.resolutions,
+        mergedText: state.lastJson,
+      }
+      : null;
+    return DraftLib.buildDraft({
+      inputs: currentInputsText(),
+      schema: els.schemaInput.value,
+      merge: mergeSpec,
+    });
+  }
+
+  function persistDraft() {
+    const ls = getStorage();
+    if (!ls) {
+      showStorageNotice(storageError);
+      return;
+    }
+    // 未合并且三方与 Schema 全空：不写空草稿（已有则清掉）
+    if (!state.parsed && isEmptyInputs(currentInputsText()) && !els.schemaInput.value.trim()) {
+      try { ls.removeItem(DraftLib.STORAGE_KEY); } catch { /* 忽略 */ }
+      return;
+    }
+    try {
+      ls.setItem(DraftLib.STORAGE_KEY, JSON.stringify(buildCurrentDraft()));
+      storageError = '';
+      storageWarned = false;
+    } catch (err) {
+      showStorageNotice(describeStorageError(err));
+    }
+  }
+
+  function scheduleDraftSave() {
+    // 用户在「恢复 / 丢弃」提示下直接开始编辑：视为放弃本次恢复询问，
+    // 新编辑随后会作为新草稿保存
+    if (pendingDraft) {
+      pendingDraft = null;
+      hideDraftBar();
+    }
+    clearTimeout(draftTimer);
+    draftTimer = setTimeout(persistDraft, 300);
+  }
+
+  // 页面隐藏 / 关闭前同步落盘一次（防抖可能还没触发）
+  function flushDraft() {
+    // 用户尚未对恢复提示做选择：页面输入框仍是空的，绝不能用空内容覆盖 / 删除草稿
+    if (pendingDraft) return;
+    clearTimeout(draftTimer);
+    persistDraft();
+  }
+
+  function clearDraftFromStorage() {
+    const ls = getStorage();
+    if (!ls) return;
+    try { ls.removeItem(DraftLib.STORAGE_KEY); } catch { /* 忽略 */ }
+  }
+
+  /* ---------- 草稿提示条 ---------- */
+
+  function hideDraftBar() {
+    els.draftBar.hidden = true;
+    els.draftBar.innerHTML = '';
+    els.draftBar.className = 'draft-bar';
+  }
+
+  // kind：prompt（恢复询问，黄）/ corrupt（损坏，红）/ storage（存储被拒，红）/ info（已恢复，蓝）
+  function showDraftBar(kind, message, buttons) {
+    els.draftBar.hidden = false;
+    els.draftBar.className = 'draft-bar ' + kind;
+    els.draftBar.innerHTML = '';
+    const msg = document.createElement('span');
+    msg.className = 'draft-msg';
+    msg.textContent = message;
+    els.draftBar.appendChild(msg);
+    if (buttons && buttons.length > 0) {
+      const wrap = document.createElement('span');
+      wrap.className = 'draft-actions';
+      for (const b of buttons) {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.textContent = b.text;
+        btn.dataset.act = b.act;
+        if (b.primary) btn.className = 'primary minor-btn';
+        else btn.className = 'minor-btn';
+        wrap.appendChild(btn);
+      }
+      els.draftBar.appendChild(wrap);
+    }
+  }
+
+  function showStorageNotice(reason) {
+    if (storageWarned) return;
+    storageWarned = true;
+    pendingDraft = null;
+    showDraftBar('storage', '本地草稿不可用：' + reason, [
+      { act: 'dismiss-storage', text: '知道了' },
+    ]);
+  }
+
+  function showCorruptDraft(reason) {
+    pendingDraft = null;
+    showDraftBar('corrupt',
+      `浏览器中的合并草稿已损坏，无法恢复：${reason} 损坏草稿不影响正常合并；可直接删除它后继续使用。`,
+      [{ act: 'delete-corrupt', text: '删除损坏草稿', primary: true }]);
+  }
+
+  function formatSavedAt(ts) {
+    const d = new Date(ts);
+    const p = (n) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} `
+      + `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+  }
+
+  function showRecoveryPrompt(draft) {
+    const when = formatSavedAt(draft.savedAt);
+    let msg;
+    if (draft.merge) {
+      const chosen = draft.merge.choices.length;
+      msg = `检测到本浏览器保存的合并草稿（保存于 ${when}）：含三方输入、可选 Schema、`
+        + `最近一次合并所用的三方文本与本轮已选 ${chosen} 个冲突。恢复后会重新解析并合并；`
+        + '仅当当前三方文本与保存的合并文本一致、且冲突路径与基线 / 我的 / 对方三值均匹配时才重放选边；'
+        + '输入已改动则只恢复编辑文本并要求重新合并，旧结果与旧校验状态不会放行导出。';
+    } else {
+      msg = `检测到本浏览器保存的输入草稿（保存于 ${when}）：含三方输入与可选 Schema，`
+        + '尚未进行过合并。可恢复这些编辑文本，或丢弃草稿。';
+    }
+    showDraftBar('prompt', msg, [
+      { act: 'restore', text: '恢复草稿', primary: true },
+      { act: 'discard', text: '丢弃草稿' },
+    ]);
+  }
+
+  function showRestoreInfo(message) {
+    showDraftBar('info', message, [{ act: 'dismiss-info', text: '知道了' }]);
+  }
+
+  // 提示条按钮统一在此分发
+  els.draftBar.addEventListener('click', (e) => {
+    const btn = e.target.closest('button[data-act]');
+    if (!btn || !els.draftBar.contains(btn)) return;
+    const act = btn.dataset.act;
+    if (act === 'restore' && pendingDraft) {
+      const draft = pendingDraft;
+      pendingDraft = null;
+      restoreDraft(draft);
+    } else if (act === 'discard') {
+      // 丢弃：删除浏览器中的草稿
+      pendingDraft = null;
+      clearDraftFromStorage();
+      hideDraftBar();
+    } else if (act === 'delete-corrupt') {
+      clearDraftFromStorage();
+      hideDraftBar();
+    } else if (act === 'dismiss-storage' || act === 'dismiss-info') {
+      hideDraftBar();
+    }
+  });
+
+  /* ---------- 恢复执行 ---------- */
+
+  function restoreDraft(draft) {
+    hideDraftBar();
+    // 无论能否重放选边，编辑文本与可选 Schema 都先恢复
+    els.base.value = draft.inputs.base;
+    els.mine.value = draft.inputs.mine;
+    els.theirs.value = draft.inputs.theirs;
+    els.schemaInput.value = draft.schema;
+    els.schemaInput.classList.remove('invalid');
+    for (const ta of [els.base, els.mine, els.theirs]) ta.classList.remove('invalid');
+
+    if (!draft.merge) {
+      // 草稿只含编辑文本（从未合并）：不恢复任何结果 / 校验状态
+      state.parsed = false;
+      els.resultSection.hidden = true;
+      els.staleNote.hidden = true;
+      syncSchemaFromInput();
+      showRestoreInfo('已恢复草稿中的三方输入与可选 Schema（该草稿尚未进行过合并）。请检查内容后点击「开始合并」。');
+      scheduleDraftSave();
+      return;
+    }
+
+    // 重新解析并合并：DraftLib 负责校验「文本一致 + 冲突三值匹配 + 结果一致」
+    const verdict = DraftLib.replaySnapshot(draft, currentInputsText());
+    if (verdict.status !== 'replay') {
+      // 输入已改动 / 冲突不匹配 / 保存结果对不上：只恢复编辑文本，要求重新合并；
+      // 不恢复结果区与任何旧校验结论，导出按钮保持禁用
+      state.parsed = false;
+      els.resultSection.hidden = true;
+      els.staleNote.hidden = true;
+      syncSchemaFromInput();
+      showRestoreInfo(`已恢复草稿中的三方输入与可选 Schema，但${verdict.reason}。`
+        + '请重新点击「开始合并」；恢复前的旧合并结果与旧校验结论不会直接放行导出。');
+      scheduleDraftSave();
+      return;
+    }
+
+    // 安全重放：以保存文本重新解析（replay 已验证可解析），载入匹配上的选边
+    state.base = JSON.parse(draft.merge.inputs.base);
+    state.mine = JSON.parse(draft.merge.inputs.mine);
+    state.theirs = JSON.parse(draft.merge.inputs.theirs);
+    state.resolutions = verdict.resolutions;
+    state.mergedInputs = {
+      base: draft.merge.inputs.base,
+      mine: draft.merge.inputs.mine,
+      theirs: draft.merge.inputs.theirs,
+    };
+    state.stale = false;
+    state.suggestion = null;
+    state.choiceImport = null;
+    // 冲突集合以重新合并为准（不携带任何旧 UI 状态）
+    state.allConflicts = merge(state.base, state.mine, state.theirs, new Map()).conflicts;
+    state.parsed = true;
+
+    els.staleNote.hidden = true;
+    els.resultSection.hidden = false;
+    // Schema 填回后重新编译；编译完成时 render() 会用恢复后的结果重新校验，
+    // 旧的通过 / 失败结论一律不继承
+    syncSchemaFromInput();
+    render();
+
+    const chosen = verdict.resolutions.size;
+    const total = state.allConflicts.length;
+    const tail = total > 0
+      ? `已重放 ${chosen} / ${total} 个冲突的选边。`
+      : '本轮无冲突。';
+    showRestoreInfo(`已恢复草稿并重新解析、重新合并：当前三方文本与保存的合并文本一致，`
+      + `冲突路径与三方值均匹配，${tail} Schema 已重新编译并按新结果校验。`);
+    scheduleDraftSave();
+    els.resultSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+
+  // 页面加载时读取草稿：可用则提示恢复 / 丢弃；损坏或存储被拒则说明原因，
+  // 均不影响正常合并
+  function initDraftRecovery() {
+    const ls = getStorage();
+    if (!ls) {
+      showStorageNotice(storageError);
+      return;
+    }
+    let raw;
+    try {
+      raw = ls.getItem(DraftLib.STORAGE_KEY);
+    } catch (err) {
+      showStorageNotice(describeStorageError(err));
+      return;
+    }
+    if (raw == null) return;
+    const parsed = DraftLib.parseDraft(raw);
+    if (parsed.status !== 'ok') {
+      showCorruptDraft(parsed.reason);
+      return;
+    }
+    const d = parsed.draft;
+    // 未合并且三方与 Schema 全空的草稿：静默清理，不打扰
+    if (!d.merge && isEmptyInputs(d.inputs) && !d.schema.trim()) {
+      clearDraftFromStorage();
+      return;
+    }
+    pendingDraft = d;
+    showRecoveryPrompt(d);
+  }
+
+  window.addEventListener('pagehide', flushDraft);
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') flushDraft();
+  });
+
   /* ---------- 事件绑定 ---------- */
 
   els.mergeBtn.addEventListener('click', doMerge);
@@ -1709,6 +2049,7 @@
     ta.addEventListener('input', () => {
       ta.classList.remove('invalid');
       markStale();
+      scheduleDraftSave(); // 合并前的编辑同样自动保存（此时草稿不含合并快照）
     });
     // Ctrl/Cmd + Enter 快捷合并
     ta.addEventListener('keydown', (e) => {
@@ -1718,4 +2059,6 @@
 
   // 初始渲染一次空 Schema 面板（隐藏状态）
   renderSchemaPanel();
+  // 检测浏览器本地草稿并提示恢复 / 丢弃（损坏或存储被拒时只说明原因）
+  initDraftRecovery();
 })();

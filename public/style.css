@@ -114,6 +114,51 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   font-size: 13px;
 }
 
+/* ---------- 浏览器本地合并草稿：恢复 / 丢弃提示条 ---------- */
+
+.draft-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  border: 1px solid #d4a72c;
+  background: var(--warn-bg);
+  border-radius: 6px;
+  padding: 10px 14px;
+  margin: 12px 0;
+  font-size: 13px;
+}
+
+.draft-bar.corrupt,
+.draft-bar.storage {
+  border-color: var(--danger);
+  background: #ffebe9;
+  color: var(--danger);
+}
+
+.draft-bar.info {
+  border-color: var(--accent);
+  background: #ddf4ff;
+}
+
+.draft-msg {
+  flex: 1 1 320px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.draft-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: nowrap;
+}
+
+.draft-bar button.minor-btn {
+  padding: 6px 14px;
+}
+
 .status-bar {
   background: #ddf4e4;
   border: 1px solid var(--ok);

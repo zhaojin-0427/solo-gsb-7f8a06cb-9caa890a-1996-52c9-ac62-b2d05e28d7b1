@@ -26,6 +26,7 @@
   - **有 Schema 时只有校验通过才允许**导出完整 JSON、复制结果、导出补丁；Schema 留空时沿用原有规则
 - **最少改选建议**：校验失败且冲突已全部选边时，可一键搜索「最少改选方案」——以当前选边为起点，只翻转已有冲突的「我的 / 对方」选择，按翻转个数从少到多（同数按冲突列表索引组合的字典序）枚举，用现有合并与 Ajv 校验找到首个通过的结果；列出需改选的冲突路径与新旧选边，确认后一次应用全部建议并自动刷新合并结果、归因清单与导出门禁；穷尽全部组合仍失败时明确提示无解，冲突超过 10 个时只提示超限；改选冲突、修改三方输入或 Schema 都会立即清除旧建议
 - **冲突选择记录（跨轮复用）**：当前轮至少选过一个冲突后，可下载仅含**已选冲突**的记录 `choices.json`——每项保存冲突路径、基线 / 我的 / 对方三值（带存在标记）与选边，**不含完整输入**。重新合并后导入记录，先预览「可复用 / 跳过」条目及跳过原因，再由用户**确认一次应用**：仅当路径与三值和当前冲突完全一致（对象忽略键序、数组保留顺序、缺失与 `null` 不混同）才复用；冲突已消失或内容变化只跳过并说明原因，**绝不覆盖当前已手动选择的冲突**；格式错误、重复路径或非法选边**拒绝整份记录**。应用后同步刷新合并结果、Schema 校验、归因清单与导出门禁；三方输入一旦编辑立即清空导入预览
+- **浏览器本地合并草稿（刷新 / 重开可恢复）**：编辑三方输入或可选 Schema、每次选边（含一次应用选择记录与最少改选建议）后都**自动保存**到当前浏览器的 `localStorage`（单键 `json-three-way-merge:draft:v1`，不发送到任何服务器）；草稿含三方输入、可选 Schema、**最近一次合并所用的三方文本**与**本轮已选冲突**。刷新或重新打开页面时弹出「恢复草稿 / 丢弃草稿」提示：恢复后**重新解析并重新合并**，只有当前三方文本与保存的合并文本**逐字符一致**、且冲突路径与基线 / 我的 / 对方三值均匹配，才重放对应选边；保存后输入已改动、冲突已变化或保存结果对不上时**只恢复编辑文本**并要求重新合并——旧结果与旧 Schema 校验结论**绝不直接放行导出**。点「清空」或在提示中点「丢弃」都会删除草稿；草稿损坏（JSON 截断 / 字段缺失 / 版本不受支持等）会说明原因并可一键删除，浏览器拒绝存储（隐私模式 / 配额已满）也只提示原因，**正常合并始终可用**
 
 ## 快速开始
 
@@ -77,6 +78,7 @@ Docker Compose 命令与端口映射保持不变（`docker compose up --build` �
 9. 全部冲突解决后，「删除影响预览」区同样列出全部顶层键：勾选拟删除的键（带「拟删除」徽标），即实时列出因本地 `$ref` 直接或间接依赖它们而受影响的其他顶层键（带「受影响」徽标）与最短依赖链；非法 / 缺失 / 外部引用会逐条列出原路径但不计入影响；改选冲突即时重算，修改三方输入立即清空，重新合并后恢复。
 10. 全部冲突解决后，「顶层键改名导出」区可任选一个顶层键并填写新键名（可为空字符串）：页面即时预览改名后的完整 JSON，点「下载改名后 JSON」导出 `renamed.json`，原合并结果不变；指向旧键名的本地 `$ref` 首段会同步改写（重新按 `~0` / `~1` 转义），新键名与其他已有键重名时报错并禁止下载，与原键名相同则提示无变化；改选冲突或修改键名即时重算，修改三方输入立即清空并禁用，重新合并后恢复。
 11. 本轮至少选过一个冲突后，「冲突选择记录（跨轮复用）」区点「下载选择记录」导出仅含已选冲突的 `choices.json`；修改三方输入并重新点击「开始合并」后，点「导入记录…」选择该文件，页面先列出可复用与跳过的条目及原因，确认后点「确认应用」一次应用全部可复用条目（合并结果、Schema 校验、归因与导出门禁随即刷新）。修改任意三方输入会立即清空导入预览。
+12. 编辑输入 / Schema 或选边后进度会自动保存到当前浏览器；刷新或重开页面时按顶部提示点「恢复草稿」（重新解析合并、匹配才重放选边；输入已改动则只恢复文本并要求重新合并）或「丢弃草稿」（立即删除本地草稿）。点「清空」同样会删除草稿。
 
 ## JSON Schema 校验（可选，Ajv 8 / Draft 2020-12）
 
@@ -559,6 +561,71 @@ console.log(plan.reusable.length, merge(base, mine, theirs, resolutions).result.
 
 相关行为见 `npm test` 中的 `test/choices.test.js`。
 
+## 浏览器本地合并草稿（刷新 / 重开恢复）
+
+合并做到一半不小心刷新、关错标签页、浏览器崩溃后重开？页面会把当前进度自动保存在**当前浏览器**的 `localStorage` 中（键名 `json-three-way-merge:draft:v1`），不发送到任何服务器；换浏览器、换机器或清除站点数据后不可见。
+
+- **自动保存时机**：编辑任意三方输入或可选 Schema（防抖约 0.3 秒，页面隐藏 / 关闭前再同步落盘一次）、每次点选冲突、一次「确认应用」选择记录或「应用全部建议」之后
+- **草稿内容**：三方输入文本、可选 Schema 文本、**最近一次「开始合并」所用的三方文本**、**本轮已选冲突**（路径 + 基线 / 我的 / 对方三值 + 选边）与当时的合并结果 JSON；合并后又改了输入也会保存最新编辑文本，且**不覆盖**合并快照
+- **恢复询问**：刷新或重新打开页面时，页面顶部出现提示条（含保存时间与已选冲突数），点「**恢复草稿**」或「**丢弃草稿**」；在提示下直接开始编辑也会自动放弃本次询问并按新内容继续保存
+- **安全重放（同时满足才重放选边）**：
+  1. 恢复后**重新解析、重新合并**，当前三方文本与保存的「最近一次合并所用文本」**逐字符一致**；
+  2. 保存条目的路径与基线 / 我的 / 对方三值在重新合并得到的冲突中**全部匹配**（对象忽略键序、数组保序、缺失与 `null` 不混同）；
+  3. 应用保存选边后的重新合并结果与保存的合并结果 JSON **深相等**。
+- **输入已改动时只恢复文本**：任一条件不满足，只恢复三方输入与 Schema 文本，**不恢复结果区与任何旧 Schema 校验结论**，提示重新点击「开始合并」；旧结果、旧「通过」状态**不会直接放行**导出 / 复制 / 补丁按钮
+- **未合并草稿**：只编辑过输入、还没点过「开始合并」时，草稿不含合并快照，恢复后只填回文本与 Schema
+- **清空与丢弃**：点页面「清空」、或在恢复提示中点「丢弃草稿」都会立即删除本地草稿
+- **异常说明但不影响合并**：草稿损坏（JSON 截断、字段缺失、版本不受支持、条目非法等）时提示具体原因并可一键「删除损坏草稿」；浏览器拒绝本地存储（隐私 / 无痕模式、站点存储被禁用、配额已满）时提示原因；两种情况下**正常合并功能始终可用**
+
+### 恢复示例
+
+1. 点「填入示例」、「开始合并」，在冲突列表中把 `$.config.port` 选为「我的版本」（另一个冲突先不选）。
+2. 直接按 F5 刷新页面（或关闭标签页后重新打开 http://localhost:8080），页面顶部出现：
+
+   > 检测到本浏览器保存的合并草稿（保存于 2026-09-28 15:04:05）：含三方输入、可选 Schema、最近一次合并所用的三方文本与本轮已选 1 个冲突。恢复后会重新解析并合并；仅当当前三方文本与保存的合并文本一致、且冲突路径与基线 / 我的 / 对方三值均匹配时才重放选边；输入已改动则只恢复编辑文本并要求重新合并，旧结果与旧校验状态不会放行导出。
+   >
+   > **[恢复草稿]** [丢弃草稿]
+
+3. 点「**恢复草稿**」：页面以保存的三方文本重新解析、重新合并，`$.config.port` 自动保持「我的版本」，另一个冲突仍待选择，Schema（若填写过）重新编译并按新结果校验；顶部蓝色提示注明「已重放 1 / 2 个冲突的选边」。
+4. 若刷新前在合并之后又改过输入（例如把我的版本里的端口改成 `8081`），恢复时顶部提示变为：
+
+   > 已恢复草稿中的三方输入与可选 Schema，但保存草稿后三方输入已改动，需要重新合并。请重新点击「开始合并」；恢复前的旧合并结果与旧校验结论不会直接放行导出。
+
+   此时只填回文本、不显示旧结果，需重新合并才能导出。
+
+核心判定逻辑在浏览器与 Node.js 中共用 `lib/draft.js`（依赖 `merge.js` 与 `choices.js`）：
+
+```bash
+node -e "
+const { merge } = require('./lib/merge.js');
+const D = require('./lib/draft.js');
+const base = { port: 3000 }, mine = { port: 8080 }, theirs = { port: 9090 };
+const tb = JSON.stringify(base), tm = JSON.stringify(mine), tt = JSON.stringify(theirs);
+const r1 = merge(base, mine, theirs, new Map());
+const resolutions = new Map([[r1.conflicts[0].key, 'mine']]);
+const r2 = merge(base, mine, theirs, resolutions);
+const draft = D.buildDraft({
+  inputs: { base: tb, mine: tm, theirs: tt }, schema: '',
+  merge: { inputs: { base: tb, mine: tm, theirs: tt },
+    conflicts: r1.conflicts, resolutions, mergedText: JSON.stringify(r2.result) },
+});
+// 刷新后：parseDraft 严格校验，replaySnapshot 重新解析合并并比对
+const loaded = D.parseDraft(JSON.stringify(draft));
+const v = D.replaySnapshot(loaded.draft, draft.inputs);
+console.log(v.status, v.resolutions.size, v.result.port);
+// 输入被改过 -> 只恢复文本
+console.log(D.replaySnapshot(loaded.draft, { base: tb, mine: tm.replace('8080','8081'), theirs: tt }).status);"
+# replay 1 8080
+# text-only
+```
+
+- `buildDraft({ inputs, schema, merge })`：构造草稿对象；`merge` 缺省 / 为 `null` 表示尚未合并；
+- `parseDraft(text)` / `validateDraft(data)`：严格校验，返回 `{ status:'ok', draft }` 或 `{ status:'error', reason }`，允许零冲突轮的空 `choices`；
+- `replaySnapshot(draft, currentInputs)`：返回 `{ status:'replay', resolutions, result, conflicts, stats }` 或 `{ status:'text-only', reason }`；
+- `STORAGE_KEY`：`json-three-way-merge:draft:v1`。
+
+相关行为见 `npm test` 中的 `test/draft.test.js`。
+
 ## 合并规则
 
 | 情形 | 处理 |
@@ -589,13 +656,14 @@ npm test        # 等价于 node --test test/
 ├── lib/delimpact.js      # 删除影响预览：顶层键 $ref 依赖图、最短依赖链（浏览器 / Node 共用）
 ├── lib/keyrename.js      # 顶层键改名导出：改名 + $ref 首段改写（浏览器 / Node 共用）
 ├── lib/choices.js        # 冲突选择记录：导出 / 严格校验 / 复用预览与应用（浏览器 / Node 共用，依赖 merge.js）
+├── lib/draft.js          # 浏览器本地合并草稿：构造 / 严格校验 / 损坏检测 / 安全重放（浏览器 / Node 共用，依赖 merge.js、choices.js）
 ├── vendor-src/
 │   └── ajv2020-entry.cjs # esbuild 打包入口：导出 Ajv 2020 构造器
 ├── vendor/
 │   └── ajv2020.js        # 浏览器端 Ajv 8 打包产物（npm run build:vendor 生成）
 ├── public/
 │   ├── index.html        # 页面
-│   ├── app.js            # 交互逻辑（解析、渲染冲突、Schema 校验、改选建议、归因清单、引用闭包导出、删除影响预览、顶层键改名导出、冲突选择记录复用、导出）
+│   ├── app.js            # 交互逻辑（解析、渲染冲突、Schema 校验、改选建议、归因清单、引用闭包导出、删除影响预览、顶层键改名导出、冲突选择记录复用、浏览器本地草稿自动保存与恢复、导出）
 │   └── style.css
 ├── test/merge.test.js    # 合并逻辑单元测试（node:test）
 ├── test/patch.test.js    # 补丁生成 / 重放单元测试（node:test）
@@ -606,6 +674,7 @@ npm test        # 等价于 node --test test/
 ├── test/delimpact.test.js  # 删除影响预览单元测试（node:test）
 ├── test/keyrename.test.js  # 顶层键改名导出单元测试（node:test）
 ├── test/choices.test.js    # 冲突选择记录单元测试（node:test）
+├── test/draft.test.js      # 浏览器本地合并草稿：构造 / 损坏检测 / 安全重放单元测试（node:test）
 ├── package.json
 ├── Dockerfile
 ├── docker-compose.yml
